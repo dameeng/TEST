@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>카카오 길찾기 테스트</title>
+  <style>
+    /* 지도와 안내 목록을 옆으로 나란히 */
+    #wrap { display: flex; gap: 8px; }
+    /* 지도: 남는 공간 전부 차지 */
+    #map { flex: 1; height: 600px; }
+    /* 안내 목록: 폭 300px, 길면 스크롤 */
+    #guide { width: 300px; height: 600px; overflow-y: auto; margin: 0; padding-left: 24px; font-size: 14px; }
+    #guide li { padding: 6px 0; border-bottom: 1px solid #eee; cursor: pointer; }
+    /* 침수 알림 상자 (처음엔 숨김) */
+    #alertBox { display: none; margin: 6px 0; padding: 10px 14px; background: #FDECEA; color: #B71C1C; border-left: 6px solid #E53935; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <!-- 출발지·도착지 입력 칸과 버튼 -->
+  <div id="search">
+    <input id="startInput" placeholder="출발지 (예: 부산역)">
+    <input id="endInput" placeholder="도착지 (예: 서면역)">
+    <button id="goBtn">길찾기</button>
+    <button id="clearFloodBtn">침수지점 모두 지우기</button>
+  </div>
+
+  <!-- 안내 글씨 -->
+  <div id="info">지도에서 마우스 오른쪽 클릭 = 침수 지하차도 지정</div>
+
+  <!-- 테스트용: 체크하면 경로 가운데를 침수로 가정 -->
+  <label><input type="checkbox" id="testFlood" checked> 테스트: 경로 중간에 침수 가정</label>
+
+  <!-- 빨간 침수 알림 상자 -->
+  <div id="alertBox"></div>
+
+  <!-- 지도 + 길 안내 목록 -->
+  <div id="wrap">
+    <div id="map"></div>
+    <ol id="guide"></ol>
+  </div>
+
+  <!-- 카카오 지도 불러오기 (services = 장소/주소 검색 기능) -->
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=72a8546e71c532bc9fbd441678023669&libraries=services&autoload=false"></script>
+  <script>
+    // 길찾기 API 키 (깃허브에 올리지 말 것!)
+    const REST_KEY = "6990d6d6e0963a25236ce13fd024cc7c";
+    // 침수 지점 주변 몇 m를 위험 구역으로 볼지
+    const FLOOD_RADIUS = 150;
+
+    // 카카오 지도 준비가 끝나면 실행
+    kakao.maps.load(() => {
+      // 지도 만들기 (처음 위치: 부산 시청 근처)
+      const map = new kakao.maps.Map(document.getElementById("map"), {
+        center: new kakao.maps.LatLng(35.1796, 129.0756),
+        level: 7,
+      });
+
+      // 장소 이름 검색 / 주소 검색 도구
+      const places = new kakao.maps.services.Places();
+      const geocoder = new kakao.maps.services.Geocoder();
+
+      let markers = []; // 지도에 꽂은 핀들
+      let lines = [];   // 지도에 그린 선들
+      let floods = [];  // 침수 지점 목록
+
+      // 침수 지점 추가 (빨간 동그라미 그리기 + 목록에 저장)
+      function addFlood(latLng, name) {
+        const circle = new kakao.maps.Circle({
+          map,
+          center: latLng,
+          radius: FLOOD_RADIUS,
+          strokeColor: "#E53935",
+          strokeWeight: 2,
+          fillColor: "#E53935",
+          fillOpacity: 0.3,
+        });
+        floods.push({ lat: latLng.getLat(), lng: latLng.getLng(), circle, name });
+      }
+
+      // 지도 오른쪽 클릭 → 그 자리를 침수 지점으로
+      kakao.maps.event.addListener(map, "rightclick", (e) => {
+        addFlood(e.latLng, "지정한 지하차도");
+        info(`침수 지점 ${floods.length}곳 지정됨. 길찾기를 다시 눌러보세요`);
+      });
+
+      // 침수 지점 모두 지우기 버튼
+      document.getElementById("clearFloodBtn").addEventListener("click", () => {
+        floods.forEach(f => f.circle.setMap(null));
+        floods = [];
+        info("침수 지점을 모두 지웠어요");
+      });
+
+      // 글자(장소명/주소) → 좌표로 바꾸기
+      function toCoord(text) {
+        return new Promise((resolve, reject) => {
+          // 1) 장소 이름으로 먼저 검색
+          places.keywordSearch(text, (result, status) => {
+            if (status === kakao.maps.services.Status.OK) {
+              resolve({ name: result[0].place_name, x: result[0].x, y: result[0].y });
+            } else {
+              // 2) 없으면 주소로 다시 검색
+              geocoder.addressSearch(text, (result2, status2) => {
+                if (status2 === kakao.maps.services.Status.OK) {
+                  resolve({ name: result2[0].address_name, x: result2[0].x, y: result2[0].y });
+                } else {
+                  reject(text); // 둘 다 실패
+                }
+              });
+            }
+          });
+        });
+      }
+
+      // 길찾기 버튼 눌렀을 때
+      async function search() {
+        const startText = document.getElementById("startInput").value.trim();
+        const endText = document.getElementById("endInput").value.trim();
+        // 빈 칸 확인
+        if (!startText || !endText) {
+          info("출발지와 도착지를 모두 입력하세요");
+          return;
+        }
+        try {
+          info("검색 중...");
+          const from = await toCoord(startText); // 출발지 좌표
+          const to = await toCoord(endText);     // 도착지 좌표
+          await findSafeRoute(from, to);         // 안전한 길 찾기
+        } catch (word) {
+          info(`"${word}" 을(를) 찾을 수 없어요`);
+        }
+      }
+
+      // 버튼 클릭 또는 엔터키로 길찾기
+      document.getElementById("goBtn").addEventListener("click", search);
+      document.querySelectorAll("#search input").forEach(input => {
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") search();
+        });
+      });
+
+      // 두 좌표 사이 거리(m) 계산
+      function distance(lat1, lng1, lat2, lng2) {
+        const R = 6371000; // 지구 반지름(m)
+        const toRad = d => d * Math.PI / 180;
+        const dLat = toRad(lat2 - lat1);
+        const dLng = toRad(lng2 - lng1);
+        const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(a));
+      }
+
+      // 경로 → 점 목록 [{lat, lng}, ...]
+      function routeToPoints(route) {
+        const pts = [];
+        route.sections.forEach(sec => sec.roads.forEach(road => {
+          // vertexes는 [경도, 위도, 경도, 위도...] 순서라 2칸씩 읽기
+          for (let i = 0; i < road.vertexes.length; i += 2) {
+            pts.push({ lng: road.vertexes[i], lat: road.vertexes[i + 1] });
+          }
+        }));
+        return pts;
+      }
+
+      // 이 경로가 침수 지점을 지나가면 그 침수 지점을 돌려줌
+      function floodOn(route) {
+        const pts = routeToPoints(route);
+        return floods.find(f => pts.some(p => distance(p.lat, p.lng, f.lat, f.lng) < FLOOD_RADIUS));
+      }
+
+      // 카카오 길찾기 API 요청 (다른 길 후보도 같이)
+      async function requestRoutes(from, to, waypoint) {
+        let url = "https://apis-navi.kakaomobility.com/v1/directions"
+          + `?origin=${from.x},${from.y}`
+          + `&destination=${to.x},${to.y}`
+          + "&alternatives=true";
+        // 경유지가 있으면 추가
+        if (waypoint) url += `&waypoints=${waypoint.lng},${waypoint.lat}`;
+        const res = await fetch(url, { headers: { Authorization: `KakaoAK ${REST_KEY}` } });
+        const data = await res.json();
+        // 성공한 경로만 남기기
+        return (data.routes || []).filter(r => r.result_code === 0);
+      }
+
+      // 침수 지점 동·서·남·북 600m에 우회용 경유지 4개 만들기
+      function makeDetourPoints(f, meters = 600) {
+        const dLat = meters / 111000;
+        const dLng = meters / (111000 * Math.cos(f.lat * Math.PI / 180));
+        return [
+          { lat: f.lat + dLat, lng: f.lng }, // 북
+          { lat: f.lat - dLat, lng: f.lng }, // 남
+          { lat: f.lat, lng: f.lng + dLng }, // 동
+          { lat: f.lat, lng: f.lng - dLng }, // 서
+        ];
+      }
+
+      // ★ 침수 지점을 피하는 안전한 길 찾기
+      async function findSafeRoute(from, to) {
+        clearRoute(); // 예전 결과 지우기
+
+        // 출발지·도착지 핀
+        markers.push(new kakao.maps.Marker({ map, position: new kakao.maps.LatLng(from.y, from.x) }));
+        markers.push(new kakao.maps.Marker({ map, position: new kakao.maps.LatLng(to.y, to.x) }));
+
+        info("경로 찾는 중...");
+        const routes = await requestRoutes(from, to);
+        if (routes.length === 0) {
+          info("길찾기 실패");
+          return;
+        }
+
+        // 테스트 모드: 첫 경로의 딱 가운데를 침수로 가정
+        if (document.getElementById("testFlood").checked && floods.length === 0) {
+          const pts = routeToPoints(routes[0]);
+          const mid = pts[Math.floor(pts.length / 2)];
+          addFlood(new kakao.maps.LatLng(mid.lat, mid.lng), "가상 지하차도");
+        }
+
+        // 추천 길이 침수 지점을 지나는지
+        const hit = floodOn(routes[0]);
+        // 후보 중 침수 지점을 안 지나는 길
+        let safe = routes.find(r => !floodOn(r));
+
+        // 후보가 다 막혔으면 → 경유지 넣어서 다시 찾기 (가장 빠른 길 선택)
+        if (!safe && hit) {
+          info("침수 지점을 피하는 길 찾는 중...");
+          for (const wp of makeDetourPoints(hit)) {
+            const rs = await requestRoutes(from, to, wp);
+            const ok = rs.find(r => !floodOn(r));
+            if (ok && (!safe || ok.summary.duration < safe.summary.duration)) safe = ok;
+          }
+        }
+
+        // 원래 길은 회색 점선으로
+        if (hit) drawRoute(routes[0], "#9E9E9E", true);
+
+        // 우회로도 못 찾았으면
+        if (!safe) {
+          info("침수 지점을 피하는 길을 찾지 못했어요");
+          showAlert(`🚫 ${hit.name} 침수! 우회할 수 있는 길이 없어요`);
+          return;
+        }
+
+        // 안전한 길은 파란 실선 + 지도 범위 맞추기
+        const path = drawRoute(safe, "#1E88E5", false);
+        const bounds = new kakao.maps.LatLngBounds();
+        path.forEach(p => bounds.extend(p));
+        map.setBounds(bounds);
+
+        // 길 안내 목록
+        showGuides(safe);
+
+        // 우회했으면 알림 (몇 분 더 걸리는지)
+        if (hit) {
+          const extra = Math.round((safe.summary.duration - routes[0].summary.duration) / 60);
+          const more = extra > 0 ? ` (약 ${extra}분 더 걸려요)` : "";
+          showAlert(`⚠️ ${hit.name} 침수! 우회 경로로 안내합니다${more}`);
+        }
+
+        // 거리·시간 표시
+        const km = (safe.summary.distance / 1000).toFixed(1);
+        const min = Math.round(safe.summary.duration / 60);
+        const warn = hit ? " | ⚠️ 침수 지하차도를 피해 우회해요" : "";
+        info(`${from.name} → ${to.name} | 거리 ${km}km · 약 ${min}분${warn}`);
+      }
+
+      // 경로 선 그리기 (dashed=true면 점선)
+      function drawRoute(route, color, dashed) {
+        // 카카오 지도는 (위도, 경도) 순서
+        const path = routeToPoints(route).map(p => new kakao.maps.LatLng(p.lat, p.lng));
+        const line = new kakao.maps.Polyline({
+          map,
+          path,
+          strokeWeight: dashed ? 4 : 6,
+          strokeColor: color,
+          strokeOpacity: 0.9,
+          strokeStyle: dashed ? "shortdash" : "solid",
+        });
+        lines.push(line);
+        return path;
+      }
+
+      // 길 안내 목록 만들기 (예: 300m 이동 후 우회전)
+      function showGuides(route) {
+        const ol = document.getElementById("guide");
+        ol.innerHTML = "";
+        route.sections.forEach(sec => (sec.guides || []).forEach(g => {
+          const li = document.createElement("li");
+          const place = g.name ? ` (${g.name})` : "";
+          li.textContent = g.distance > 0
+            ? `${g.distance}m 이동 후 ${g.guidance}${place}`
+            : `${g.guidance}${place}`;
+          // 누르면 그 지점으로 지도 이동
+          li.addEventListener("click", () => {
+            map.setLevel(3);
+            map.panTo(new kakao.maps.LatLng(g.y, g.x));
+          });
+          ol.appendChild(li);
+        }));
+      }
+
+      // 핀, 선, 안내 목록, 알림 모두 지우기
+      function clearRoute() {
+        markers.forEach(m => m.setMap(null));
+        lines.forEach(l => l.setMap(null));
+        markers = [];
+        lines = [];
+        document.getElementById("guide").innerHTML = "";
+        document.getElementById("alertBox").style.display = "none";
+      }
+
+      // 빨간 알림 상자 보이기
+      function showAlert(text) {
+        const box = document.getElementById("alertBox");
+        box.textContent = text;
+        box.style.display = "block";
+      }
+
+      // 위쪽 안내 글씨 바꾸기
+      function info(text) {
+        document.getElementById("info").textContent = text;
+      }
+    });
+  </script>
+</body>
+</html>

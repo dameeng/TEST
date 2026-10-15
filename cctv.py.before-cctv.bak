@@ -1,0 +1,32 @@
+import requests
+
+# 발급받은 API 키
+API_KEY = "ad717d0494e943a08af83f318f6e54d5"
+
+# ITS CCTV API 주소
+url = "https://openapi.its.go.kr:9443/cctvInfo"
+
+# 요청할 데이터
+params = {
+    "apiKey": API_KEY,
+    "type": "ex",       # 고속도로
+    "cctvType": "1",     # CCTV 유형
+    "minX": "126.8",     # 최소 경도
+    "maxX": "127.2",     # 최대 경도
+    "minY": "37.3",      # 최소 위도
+    "maxY": "37.7",      # 최대 위도
+    "getType": "json"    # JSON 응답
+}
+
+# API 요청
+response = requests.get(
+    url,
+    params=params,
+    timeout=15
+)
+
+# 응답 상태 확인
+print("상태 코드:", response.status_code)
+
+# 응답 데이터 출력
+print(response.text)
